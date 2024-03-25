@@ -262,8 +262,10 @@ async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise
     const transaction = new VersionedTransaction(messageV0);
     transaction.sign([wallet, ...innerTransaction.signers]);
     const signature = await solanaConnection.sendRawTransaction(transaction.serialize(), {
-      preflightCommitment: COMMITMENT_LEVEL,
+      skipPreflight: true,
+      maxRetries: 3,
     });
+
     logger.info({ mint: accountData.baseMint, signature }, `Sent buy tx`);
     const confirmation = await solanaConnection.confirmTransaction(
       {
