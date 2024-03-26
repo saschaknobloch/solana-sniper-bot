@@ -16,4 +16,5 @@ export const PRIVATE_KEY = retrieveEnvVariable('PRIVATE_KEY', logger);
 export const QUOTE_MINT = retrieveEnvVariable('QUOTE_MINT', logger);
 export const QUOTE_AMOUNT = retrieveEnvVariable('QUOTE_AMOUNT', logger);
 export const MIN_POOL_SIZE = retrieveEnvVariable('MIN_POOL_SIZE', logger);
-
+export const PRIORITY_FEE = Number(retrieveEnvVariable('PRIORITY_FEE', logger));
+export const ADDRESS_LOOKUP_TABLE = retrieveEnvVariable('ADDRESS_LOOKUP_TABLE', logger);

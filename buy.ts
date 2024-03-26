@@ -12,7 +12,9 @@ import {
 import {
   AccountLayout,
   createAssociatedTokenAccountIdempotentInstruction,
+  createAssociatedTokenAccountInstruction,
   createCloseAccountInstruction,
+  getAssociatedTokenAddress,
   getAssociatedTokenAddressSync,
   TOKEN_PROGRAM_ID,
 } from '@solana/spl-token';
@@ -24,6 +26,10 @@ import {
   KeyedAccountInfo,
   TransactionMessage,
   VersionedTransaction,
+  LAMPORTS_PER_SOL,
+  AddressLookupTableAccount,
+  SystemInstruction,
+  SystemProgram,
 } from '@solana/web3.js';
 import { getTokenAccounts, RAYDIUM_LIQUIDITY_PROGRAM_ID_V4, OPENBOOK_PROGRAM_ID, createPoolKeys } from './liquidity';
 import { logger } from './utils';
@@ -48,6 +54,8 @@ import {
   SNIPE_LIST_REFRESH_INTERVAL,
   USE_SNIPE_LIST,
   MIN_POOL_SIZE,
+  PRIORITY_FEE,
+  ADDRESS_LOOKUP_TABLE,
 } from './constants';
 
 const solanaConnection = new Connection(RPC_ENDPOINT, {
@@ -70,6 +78,9 @@ let quoteToken: Token;
 let quoteTokenAssociatedAddress: PublicKey;
 let quoteAmount: TokenAmount;
 let quoteMinPoolSizeAmount: TokenAmount;
+let priorityFee: number;
+let lutAccount: AddressLookupTableAccount | null;
+let raydiumSubscriptionId: number;
 
 let snipeList: string[] = [];
 
@@ -79,6 +90,15 @@ async function init(): Promise<void> {
   // get wallet
   wallet = Keypair.fromSecretKey(bs58.decode(PRIVATE_KEY));
   logger.info(`Wallet Address: ${wallet.publicKey}`);
+
+  // set priority fee
+  priorityFee = PRIORITY_FEE * LAMPORTS_PER_SOL * 10;
+  logger.info(`Priority fee: ${PRIORITY_FEE} SOL`);
+
+  // set address lookup table account
+  if (ADDRESS_LOOKUP_TABLE) {
+    lutAccount = (await solanaConnection.getAddressLookupTable(new PublicKey(ADDRESS_LOOKUP_TABLE))).value;
+  }
 
   // get quote mint and amount
   switch (QUOTE_MINT) {
@@ -182,6 +202,9 @@ export async function processRaydiumPool(id: PublicKey, poolState: LiquidityStat
     }
   }
 
+  // now we can end the subscription
+  solanaConnection.removeProgramAccountChangeListener(raydiumSubscriptionId);
+
   await buy(id, poolState);
 }
 
@@ -244,13 +267,14 @@ async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise
     const latestBlockhash = await solanaConnection.getLatestBlockhash({
       commitment: COMMITMENT_LEVEL,
     });
+
     const messageV0 = new TransactionMessage({
       payerKey: wallet.publicKey,
       recentBlockhash: latestBlockhash.blockhash,
       instructions: [
-        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 421197 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
         ComputeBudgetProgram.setComputeUnitLimit({ units: 101337 }),
-        createAssociatedTokenAccountIdempotentInstruction(
+        createAssociatedTokenAccountInstruction(
           wallet.publicKey,
           tokenAccount.address,
           wallet.publicKey,
@@ -258,13 +282,10 @@ async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise
         ),
         ...innerTransaction.instructions,
       ],
-    }).compileToV0Message();
+    }).compileToV0Message(lutAccount ? [lutAccount] : []);
     const transaction = new VersionedTransaction(messageV0);
     transaction.sign([wallet, ...innerTransaction.signers]);
-    const signature = await solanaConnection.sendRawTransaction(transaction.serialize(), {
-      skipPreflight: true,
-      maxRetries: 3,
-    });
+    const signature = await solanaConnection.sendRawTransaction(transaction.serialize(), { preflightCommitment: COMMITMENT_LEVEL});
 
     logger.info({ mint: accountData.baseMint, signature }, `Sent buy tx`);
     const confirmation = await solanaConnection.confirmTransaction(
@@ -289,7 +310,7 @@ async function buy(accountId: PublicKey, accountData: LiquidityStateV4): Promise
       logger.info({ mint: accountData.baseMint, signature }, `Error confirming buy tx`);
     }
   } catch (e) {
-    logger.debug(e);
+    logger.error(e);
     logger.error({ mint: accountData.baseMint }, `Failed to buy token`);
   }
 }
@@ -416,7 +437,7 @@ function shouldBuy(key: string): boolean {
 const runListener = async () => {
   await init();
   const runTimestamp = Math.floor(new Date().getTime() / 1000);
-  const raydiumSubscriptionId = solanaConnection.onProgramAccountChange(
+  raydiumSubscriptionId = solanaConnection.onProgramAccountChange(
     RAYDIUM_LIQUIDITY_PROGRAM_ID_V4,
     async (updatedAccountInfo) => {
       const key = updatedAccountInfo.accountId.toString();
@@ -453,27 +474,27 @@ const runListener = async () => {
     ],
   );
 
-  const openBookSubscriptionId = solanaConnection.onProgramAccountChange(
-    OPENBOOK_PROGRAM_ID,
-    async (updatedAccountInfo) => {
-      const key = updatedAccountInfo.accountId.toString();
-      const existing = existingOpenBookMarkets.has(key);
-      if (!existing) {
-        existingOpenBookMarkets.add(key);
-        const _ = processOpenBookMarket(updatedAccountInfo);
-      }
-    },
-    COMMITMENT_LEVEL,
-    [
-      { dataSize: MARKET_STATE_LAYOUT_V3.span },
-      {
-        memcmp: {
-          offset: MARKET_STATE_LAYOUT_V3.offsetOf('quoteMint'),
-          bytes: quoteToken.mint.toBase58(),
-        },
-      },
-    ],
-  );
+  // const openBookSubscriptionId = solanaConnection.onProgramAccountChange(
+  //   OPENBOOK_PROGRAM_ID,
+  //   async (updatedAccountInfo) => {
+  //     const key = updatedAccountInfo.accountId.toString();
+  //     const existing = existingOpenBookMarkets.has(key);
+  //     if (!existing) {
+  //       existingOpenBookMarkets.add(key);
+  //       const _ = processOpenBookMarket(updatedAccountInfo);
+  //     }
+  //   },
+  //   COMMITMENT_LEVEL,
+  //   [
+  //     { dataSize: MARKET_STATE_LAYOUT_V3.span },
+  //     {
+  //       memcmp: {
+  //         offset: MARKET_STATE_LAYOUT_V3.offsetOf('quoteMint'),
+  //         bytes: quoteToken.mint.toBase58(),
+  //       },
+  //     },
+  //   ],
+  // );
 
   if (AUTO_SELL) {
     const walletSubscriptionId = solanaConnection.onProgramAccountChange(
@@ -505,7 +526,7 @@ const runListener = async () => {
   }
 
   logger.info(`Listening for raydium changes: ${raydiumSubscriptionId}`);
-  logger.info(`Listening for open book changes: ${openBookSubscriptionId}`);
+  // logger.info(`Listening for open book changes: ${openBookSubscriptionId}`);
 
   if (USE_SNIPE_LIST) {
     setInterval(loadSnipeList, SNIPE_LIST_REFRESH_INTERVAL);
