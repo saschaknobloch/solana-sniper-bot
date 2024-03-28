@@ -202,9 +202,6 @@ export async function processRaydiumPool(id: PublicKey, poolState: LiquidityStat
     }
   }
 
-  // now we can end the subscription
-  solanaConnection.removeProgramAccountChangeListener(raydiumSubscriptionId);
-
   await buy(id, poolState);
 }
 
